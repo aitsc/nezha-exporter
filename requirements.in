@@ -1,0 +1,5 @@
+fastapi
+httpx
+prometheus-client
+uvicorn
+tsc-base
