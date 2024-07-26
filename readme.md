@@ -1,5 +1,5 @@
 # 介绍
-nezha 面板 api 转 prometheus metrics 接口
+nezha 面板 api 转 prometheus metrics 接口 exporter
 
 ## 安装
 - pip install nezha-exporter

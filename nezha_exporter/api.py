@@ -1,10 +1,11 @@
 from fastapi import FastAPI, Response, HTTPException, status
 import httpx
-from prometheus_client import Gauge, generate_latest, CollectorRegistry, Info
+from prometheus_client import Gauge, generate_latest, CollectorRegistry
 import uvicorn
 import argparse
-from tsc_base import merge_dict
+from tsc_base import merge_dict, dict_to_pair, get
 from pprint import pprint
+import json
 
 
 app = FastAPI()
@@ -50,63 +51,60 @@ async def get_nezha_info(url: str) -> dict:
 def value_norm(v):
     if isinstance(v, (int, float)):
         return v
+    elif isinstance(v, (list, dict)):
+        try:
+            return json.dumps(v, ensure_ascii=False)
+        except:
+            ...
     return str(v)
 
 
 @app.get(args.web_telemetry_path)
 async def metrics():
     server_details: list[dict] = await get_nezha_info(f"{args.endpoint}/api/v1/server/details?id=")
-    labels = [
-        'id',
-        'ipv4',
-        'ipv6',
-        'name',
-        'tag',
-        'valid_ip',
-    ]
     one_server = merge_dict(server_details)
     # pprint(one_server)
     
+    labels_keys: dict[str, list[str]] = {}
+    for keys, v in dict_to_pair(one_server):
+        label = '_'.join(keys)
+        if not isinstance(v, (int, float)) and (
+            isinstance(v, str) or
+            keys[0] == 'host'
+        ):
+            labels_keys[label] = keys
+    labels = list(labels_keys)
+    
     registry = CollectorRegistry()
-    host_info = Info('nezha_host_info', 'Host static information', labels, registry=registry)
-    last_active = Gauge('nezha_last_active', 'Last active time of the server', labels, registry=registry)
-    # status
-    status_metrics = {
-        k: Gauge(f'nezha_status_{k}', f'status of {k}', labels, registry=registry) 
-        for k, v in (one_server.get('status') or {}).items() if isinstance(v, (int, float))}
-    # status.Temperatures
-    temperatures_metrics: dict[str, Gauge] = {}
-    temperatures: list[dict] = (one_server.get('status') or {}).get('Temperatures')
-    if temperatures:
-        for temp_obj in temperatures:
-            name = temp_obj.get('Name')
-            if name and name not in temperatures_metrics:
-                temperatures_metrics[name] = Gauge(
-                    f'nezha_temperature_{name}', f'Temperature of the server {name}', labels, registry=registry)
+    metrics_warp: dict[str, Gauge] = {}
     
     for details in server_details:
         if not isinstance(details, dict):
             continue
-        labels_values = [value_norm(details.get(l)) for l in labels]
+        labels_values = [value_norm(get(keys, details, '')) for keys in labels_keys.values()]
         
-        host_info.labels(*labels_values).info({
-            str(k): str(v) for k, v in details.get('host', {}).items()
-        })
-        if isinstance(details.get('last_active'), (int, float)):
-            last_active.labels(*labels_values).set(details.get('last_active'))
-        # status
-        for k, v in (details.get('status') or {}).items():
-            if not isinstance(v, (int, float)):
+        for keys, v in dict_to_pair(details):
+            metric = '_'.join(keys)
+            if metric in labels_keys:
                 continue
-            status_metrics[k].labels(*labels_values).set(v)
-        # status.Temperatures
-        temperatures: list[dict] = (details.get('status') or {}).get('Temperatures')
-        if temperatures:
-            for temp_obj in temperatures:
-                name = temp_obj.get('Name')
-                temp = temp_obj.get('Temperature')
-                if name and isinstance(temp, (int, float)):
-                    temperatures_metrics[name].labels(*labels_values).set(temp)
+            
+            if isinstance(v, (int, float)):
+                if metric not in metrics_warp:
+                    metrics_warp[metric] = Gauge(f'nezha_{metric}', f'nezha {keys}', labels, registry=registry)
+                metrics_warp[metric].labels(*labels_values).set(v)
+                
+            elif isinstance(v, list) and keys[-1] == 'Temperatures':
+                for temp_obj in v:
+                    if not isinstance(temp_obj, dict):
+                        continue
+                    name = temp_obj.get('Name')
+                    temp = temp_obj.get('Temperature')
+                    if not (name and isinstance(temp, (int, float))):
+                        continue
+                    metric_ = f'{metric}_{name}'
+                    if metric_ not in metrics_warp:
+                        metrics_warp[metric_] = Gauge(f'nezha_{metric_}', f'nezha {keys + [name]}', labels, registry=registry)
+                    metrics_warp[metric_].labels(*labels_values).set(temp)
                     
     return Response(generate_latest(registry), media_type='text/plain')
 
